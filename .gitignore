@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Xcode
+DerivedData/
+.build/
+*.xcuserstate
+xcuserdata/
+
+# Swift Package Manager
+.swiftpm/
+Packages/
+
+# Python
+server/venv/
+__pycache__/
+*.pyc
+
+# Environment files
+.env
+
+# Logs
+*.log
