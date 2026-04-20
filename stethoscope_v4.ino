@@ -8,8 +8,8 @@
 #define I2S_WS    18
 #define I2S_DIN   16
 
-#define SAMPLE_RATE_HZ      16000 //16000から変更
-#define DECIMATION_FACTOR   4 //sample_rate_hz 16000 4から変更（1000Hzが4だと５００、２だと２５０Hz）         // 16000 ÷ 4 = 4000Hz出力
+#define SAMPLE_RATE_HZ      16000 //
+#define DECIMATION_FACTOR   4// 16000 ÷ 4 = 4000Hz出力
 #define OUTPUT_RATE_HZ      (SAMPLE_RATE_HZ / DECIMATION_FACTOR)
 #define SAMPLES_PER_PACKET  160       // 160 ÷ 4000 = 40ms分
 
@@ -117,7 +117,7 @@ void loop() {
   i2s_channel_read(rx_chan, buf, sizeof(buf), &bytes_read, portMAX_DELAY);
   if (bytes_read < sizeof(buf)) return;
 
-  // Lチャンネルだけ使う（Rは常に0なので捨てる）
+  // Lチャンネルだけ使う（Rは常に0なので捨てる）ここが要だった！！
   int32_t sample = buf[0] >> 16;
 
   // ボックスフィルター（アンチエイリアス）
