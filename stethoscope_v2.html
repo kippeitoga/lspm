@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32 Stethoscope</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: sans-serif;
+      background: #0f1117;
+      color: #e0e0e0;
+      min-height: 100vh;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      align-items: center;
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 500;
+      color: #fff;
+      letter-spacing: 0.5px;
+    }
+
+    .card {
+      background: #1a1d27;
+      border: 0.5px solid #2e3145;
+      border-radius: 12px;
+      padding: 20px;
+      width: 100%;
+      max-width: 760px;
+    }
+
+    .status-bar {
+      font-size: 13px;
+      color: #888;
+      text-align: center;
+      padding: 10px 16px;
+      background: #13151f;
+      border: 0.5px solid #2e3145;
+      border-radius: 8px;
+      width: 100%;
+      max-width: 760px;
+    }
+
+    .status-bar span { color: #a0c4ff; font-weight: 500; }
+
+    .controls {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: center;
+      width: 100%;
+      max-width: 760px;
+    }
+
+    button {
+      padding: 10px 22px;
+      border-radius: 8px;
+      border: 0.5px solid #3a3f5c;
+      background: #1a1d27;
+      color: #e0e0e0;
+      font-size: 14px;
+      cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+    }
+    button:hover:not(:disabled) { background: #252840; }
+    button:active:not(:disabled) { transform: scale(0.98); }
+    button:disabled { opacity: 0.35; cursor: default; }
+
+    #btnConnect  { border-color: #4a90d9; color: #4a90d9; }
+    #btnRecord   { border-color: #e05c5c; color: #e05c5c; }
+    #btnStop     { border-color: #f0a030; color: #f0a030; }
+    #btnPlay     { border-color: #50c878; color: #50c878; }
+    #btnDownload { border-color: #a78bfa; color: #a78bfa; }
+
+    .section-label {
+      font-size: 11px;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+    }
+
+    canvas {
+      width: 100%;
+      height: 160px;
+      display: block;
+      border-radius: 6px;
+      background: #0d0f18;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+      width: 100%;
+      max-width: 760px;
+    }
+
+    .metric {
+      background: #1a1d27;
+      border: 0.5px solid #2e3145;
+      border-radius: 8px;
+      padding: 12px 16px;
+      text-align: center;
+    }
+
+    .metric-label {
+      font-size: 11px;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 4px;
+    }
+
+    .metric-value {
+      font-size: 20px;
+      font-weight: 500;
+      color: #c0d4ff;
+    }
+
+    .recording-indicator {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #e05c5c;
+      margin-right: 6px;
+      animation: blink 1s infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.2; }
+    }
+
+    audio {
+      width: 100%;
+      margin-top: 12px;
+      border-radius: 8px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>ESP32 Stethoscope</h1>
+
+<div class="status-bar" id="status">未接続 — 「BLE接続」を押してください</div>
+
+<div class="controls">
+  <button id="btnConnect">BLE接続</button>
+  <button id="btnRecord"   disabled>録音開始</button>
+  <button id="btnStop"     disabled>録音停止</button>
+  <button id="btnPlay"     disabled>録音を再生</button>
+  <button id="btnDownload" disabled>WAVで保存</button>
+</div>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="metric-label">サンプルレート</div>
+    <div class="metric-value">4000 Hz</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">受信バイト</div>
+    <div class="metric-value" id="mBytes">0</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">録音時間</div>
+    <div class="metric-value" id="mDuration">0.0 s</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">ステータス</div>
+    <div class="metric-value" id="mState">待機中</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-label">リアルタイム波形</div>
+  <canvas id="waveCanvas"></canvas>
+</div>
+
+<div class="card" id="playbackCard" style="display:none;">
+  <div class="section-label">録音した音声</div>
+  <audio id="audioPlayer" controls></audio>
+</div>
+
+<script>
+const SAMPLE_RATE  = 4000;
+const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const CHAR_UUID_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+let bleDevice       = null;
+let bleChar         = null;
+let isRecording     = false;
+let totalBytes      = 0;
+let recordedSamples = [];
+
+const btnConnect   = document.getElementById('btnConnect');
+const btnRecord    = document.getElementById('btnRecord');
+const btnStop      = document.getElementById('btnStop');
+const btnPlay      = document.getElementById('btnPlay');
+const btnDownload  = document.getElementById('btnDownload');
+const statusEl     = document.getElementById('status');
+const mBytes       = document.getElementById('mBytes');
+const mDuration    = document.getElementById('mDuration');
+const mState       = document.getElementById('mState');
+const audioPlayer  = document.getElementById('audioPlayer');
+const playbackCard = document.getElementById('playbackCard');
+
+const canvas = document.getElementById('waveCanvas');
+const ctx    = canvas.getContext('2d');
+
+function resizeCanvas() {
+  canvas.width  = canvas.offsetWidth;
+  canvas.height = canvas.offsetHeight;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+let waveBuffer = new Float32Array(canvas.width);
+
+function drawWaveform(samples) {
+  const W   = canvas.width;
+  const H   = canvas.height;
+  const mid = H / 2;
+
+  const shifted = new Float32Array(W);
+  shifted.set(waveBuffer.slice(samples.length));
+  for (let i = 0; i < samples.length && i < W; i++) {
+    shifted[W - samples.length + i] = samples[i] / 32768.0;
+  }
+  waveBuffer = shifted;
+
+  ctx.fillStyle = '#0d0f18';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.strokeStyle = '#2e3145';
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(0, mid);
+  ctx.lineTo(W, mid);
+  ctx.stroke();
+
+  ctx.strokeStyle = '#4a90d9';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < W; i++) {
+    const y = mid - waveBuffer[i] * mid * 0.85;
+    i === 0 ? ctx.moveTo(i, y) : ctx.lineTo(i, y);
+  }
+  ctx.stroke();
+}
+
+function setStatus(msg, isRec) {
+  statusEl.innerHTML = isRec
+    ? `<span class="recording-indicator"></span>${msg}`
+    : msg;
+}
+
+btnConnect.addEventListener('click', async () => {
+  try {
+    setStatus('BLEデバイスを検索中...');
+    bleDevice = await navigator.bluetooth.requestDevice({
+      filters: [{ name: 'ESP32_Stethoscope' }],
+      optionalServices: [SERVICE_UUID]
+    });
+    bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+    setStatus('接続中...');
+    const server  = await bleDevice.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    bleChar        = await service.getCharacteristic(CHAR_UUID_TX);
+    await bleChar.startNotifications();
+    bleChar.addEventListener('characteristicvaluechanged', onDataReceived);
+    setStatus('<span>接続完了 — ESP32_Stethoscope</span>');
+    btnConnect.disabled = true;
+    btnRecord.disabled  = false;
+    mState.textContent  = '接続済み';
+  } catch (err) {
+    setStatus('接続失敗: ' + err.message);
+  }
+});
+
+function onDataReceived(event) {
+  const raw     = event.target.value;
+  const samples = new Int16Array(raw.buffer);
+
+  totalBytes += raw.byteLength;
+  mBytes.textContent = totalBytes.toLocaleString();
+
+  drawWaveform(samples);
+
+  if (isRecording) {
+    for (let s of samples) recordedSamples.push(s);
+    const duration = recordedSamples.length / SAMPLE_RATE;
+    mDuration.textContent = duration.toFixed(1) + ' s';
+  }
+}
+
+btnRecord.addEventListener('click', () => {
+  isRecording              = true;
+  recordedSamples          = [];
+  mDuration.textContent    = '0.0 s';
+  btnRecord.disabled       = true;
+  btnStop.disabled         = false;
+  btnPlay.disabled         = true;
+  btnDownload.disabled     = true;
+  playbackCard.style.display = 'none';
+  mState.textContent       = '録音中';
+  setStatus('録音中...', true);
+});
+
+btnStop.addEventListener('click', () => {
+  isRecording          = false;
+  btnRecord.disabled   = false;
+  btnStop.disabled     = true;
+  btnPlay.disabled     = recordedSamples.length === 0;
+  btnDownload.disabled = recordedSamples.length === 0;
+  mState.textContent   = '録音完了';
+  const duration = (recordedSamples.length / SAMPLE_RATE).toFixed(1);
+  setStatus(`<span>録音完了 — ${duration}秒 / ${recordedSamples.length.toLocaleString()}サンプル</span>`);
+  if (recordedSamples.length > 0) buildAudioPlayer();
+});
+
+function buildAudioPlayer() {
+  const float32 = new Float32Array(recordedSamples.length);
+  for (let i = 0; i < recordedSamples.length; i++) {
+    float32[i] = recordedSamples[i] / 32768.0;
+  }
+
+  const offCtx = new OfflineAudioContext(1, float32.length, SAMPLE_RATE);
+  const buffer = offCtx.createBuffer(1, float32.length, SAMPLE_RATE);
+  buffer.copyToChannel(float32, 0);
+  const src = offCtx.createBufferSource();
+  src.buffer = buffer;
+  src.connect(offCtx.destination);
+  src.start();
+
+  offCtx.startRendering().then(rendered => {
+    const streamCtx  = new AudioContext({ sampleRate: SAMPLE_RATE });
+    const streamDest = streamCtx.createMediaStreamDestination();
+    const playSrc    = streamCtx.createBufferSource();
+    playSrc.buffer   = rendered;
+    playSrc.connect(streamDest);
+
+    const chunks   = [];
+    const mimeType = MediaRecorder.isTypeSupported('audio/ogg; codecs=opus')
+      ? 'audio/ogg; codecs=opus'
+      : 'audio/webm; codecs=opus';
+
+    const recorder = new MediaRecorder(streamDest.stream, { mimeType });
+    recorder.ondataavailable = e => chunks.push(e.data);
+    recorder.onstop = () => {
+      // 再生用はOGG/webm（ブラウザで再生できる）
+      const blob = new Blob(chunks, { type: mimeType });
+      const url  = URL.createObjectURL(blob);
+      audioPlayer.src = url;
+      playbackCard.style.display = 'block';
+      streamCtx.close();
+
+      // ダウンロードはWAV（MATLABで解析しやすい）
+      btnDownload.onclick = () => {
+        const wav   = buildWAV(recordedSamples, SAMPLE_RATE);
+        const wblob = new Blob([wav], { type: 'audio/wav' });
+        const wurl  = URL.createObjectURL(wblob);
+        const a     = document.createElement('a');
+        a.href      = wurl;
+        a.download  = `stethoscope_${Date.now()}.wav`;
+        a.click();
+        URL.revokeObjectURL(wurl);
+      };
+    };
+
+    recorder.start();
+    playSrc.start();
+    setTimeout(() => recorder.stop(), (float32.length / SAMPLE_RATE) * 1000 + 500);
+  });
+}
+
+btnPlay.addEventListener('click', () => {
+  if (recordedSamples.length > 0) buildAudioPlayer();
+});
+
+// WAVファイル生成（非圧縮16bit PCM mono、MATLABで直接読める）
+function buildWAV(samples, sampleRate) {
+  const byteCount = samples.length * 2;
+  const buffer    = new ArrayBuffer(44 + byteCount);
+  const view      = new DataView(buffer);
+  const writeStr  = (offset, str) => {
+    for (let i = 0; i < str.length; i++)
+      view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeStr(0,  'RIFF');
+  view.setUint32(4,  36 + byteCount,  true);
+  writeStr(8,  'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16,              true); // chunksize
+  view.setUint16(20, 1,               true); // PCM
+  view.setUint16(22, 1,               true); // mono
+  view.setUint32(24, sampleRate,      true); // sample rate
+  view.setUint32(28, sampleRate * 2,  true); // byte rate
+  view.setUint16(32, 2,               true); // block align
+  view.setUint16(34, 16,              true); // 16bit
+  writeStr(36, 'data');
+  view.setUint32(40, byteCount,       true);
+  const out = new Int16Array(buffer, 44);
+  for (let i = 0; i < samples.length; i++) out[i] = samples[i];
+  return buffer;
+}
+
+function onDisconnected() {
+  setStatus('切断されました — ページを再読み込みして再接続してください');
+  btnConnect.disabled = false;
+  btnRecord.disabled  = true;
+  btnStop.disabled    = true;
+  isRecording         = false;
+  mState.textContent  = '切断';
+}
+</script>
+</body>
+</html>
