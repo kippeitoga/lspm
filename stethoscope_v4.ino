@@ -4,26 +4,15 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
-// ============================================================
-// PIN CONFIGURATION
-// INMP441: SCK→17, WS→18, SD→16, L/R→GND
-// ============================================================
 #define I2S_BCLK  17
 #define I2S_WS    18
 #define I2S_DIN   16
 
-// ============================================================
-// AUDIO CONFIGURATION
-// 16kHz取得 → 2間引き → 8kHz出力
-// ============================================================
-#define SAMPLE_RATE_HZ      16000
-#define DECIMATION_FACTOR   2
-#define OUTPUT_RATE_HZ      (SAMPLE_RATE_HZ / DECIMATION_FACTOR)  // 8000Hz
-#define SAMPLES_PER_PACKET  160       // 20ms分のデータ
+#define SAMPLE_RATE_HZ      16000 //16000から変更
+#define DECIMATION_FACTOR   4 //sample_rate_hz 16000 4から変更（1000Hzが4だと５００、２だと２５０Hz）         // 16000 ÷ 4 = 4000Hz出力
+#define OUTPUT_RATE_HZ      (SAMPLE_RATE_HZ / DECIMATION_FACTOR)
+#define SAMPLES_PER_PACKET  160       // 160 ÷ 4000 = 40ms分
 
-// ============================================================
-// BLE
-// ============================================================
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
@@ -33,9 +22,6 @@ BLECharacteristic*  pTxCharacteristic = nullptr;
 bool                deviceConnected   = false;
 QueueHandle_t       audioQueue;
 
-// ============================================================
-// BLE CALLBACKS
-// ============================================================
 class MyServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) override {
     deviceConnected = true;
@@ -46,9 +32,6 @@ class MyServerCallbacks : public BLEServerCallbacks {
   }
 };
 
-// ============================================================
-// CORE 0: BLE送信タスク
-// ============================================================
 void bleTask(void* pvParameters) {
   int16_t tx_buffer[SAMPLES_PER_PACKET];
   while (true) {
@@ -59,15 +42,12 @@ void bleTask(void* pvParameters) {
           sizeof(int16_t) * SAMPLES_PER_PACKET
         );
         pTxCharacteristic->notify();
-        vTaskDelay(pdMS_TO_TICKS(18));
+        vTaskDelay(pdMS_TO_TICKS(38));
       }
     }
   }
 }
 
-// ============================================================
-// I2S初期化
-// ============================================================
 void initI2S() {
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
   chan_cfg.dma_desc_num  = 8;
@@ -76,7 +56,7 @@ void initI2S() {
 
   i2s_std_config_t std_cfg = {
     .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE_HZ),
-    .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(
+    .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
       I2S_DATA_BIT_WIDTH_32BIT,
       I2S_SLOT_MODE_MONO
     ),
@@ -92,9 +72,6 @@ void initI2S() {
   ESP_ERROR_CHECK(i2s_channel_enable(rx_chan));
 }
 
-// ============================================================
-// BLE初期化
-// ============================================================
 void initBLE() {
   BLEDevice::init("ESP32_Stethoscope");
   BLEDevice::setMTU(512);
@@ -110,30 +87,22 @@ void initBLE() {
   pServer->getAdvertising()->start();
 }
 
-// ============================================================
-// SETUP
-// ============================================================
 void setup() {
-  // キューを20パケット分確保（約400ms分のバッファ）
+  Serial.begin(921600);
+  delay(500);
+  Serial.printf("SAMPLE_RATE_HZ    : %d\n", SAMPLE_RATE_HZ);
+  Serial.printf("DECIMATION_FACTOR : %d\n", DECIMATION_FACTOR);
+  Serial.printf("OUTPUT_RATE_HZ    : %d\n", OUTPUT_RATE_HZ);
+  Serial.printf("SAMPLES_PER_PACKET: %d\n", SAMPLES_PER_PACKET);
+  Serial.printf("vTaskDelay        : %d ms\n", 
+    (SAMPLES_PER_PACKET * 1000 / OUTPUT_RATE_HZ) - 2);
   audioQueue = xQueueCreate(20, sizeof(int16_t) * SAMPLES_PER_PACKET);
   if (!audioQueue) { while (true) {} }
-
   initI2S();
   initBLE();
-
   xTaskCreatePinnedToCore(bleTask, "BLE_Task", 4096, NULL, 2, NULL, 0);
-
-  // ★追加：起動時に設定を表示
-  Serial.begin(921600);
-  Serial.printf("SAMPLE_RATE_HZ: %d\n", SAMPLE_RATE_HZ);
-  Serial.printf("DECIMATION_FACTOR: %d\n", DECIMATION_FACTOR);
-  Serial.printf("OUTPUT_RATE_HZ: %d\n", OUTPUT_RATE_HZ);
-  Serial.printf("SAMPLES_PER_PACKET: %d\n", SAMPLES_PER_PACKET);
 }
 
-// ============================================================
-// CORE 1: マイク読み取り
-// ============================================================
 void loop() {
   static int32_t accumulator  = 0;
   static int     decim_count  = 0;
@@ -142,17 +111,16 @@ void loop() {
   static int16_t packet[SAMPLES_PER_PACKET];
   static int     packet_index  = 0;
 
-  int32_t raw        = 0;
+  // LとRの2チャンネル分読む
+  int32_t buf[2];
   size_t  bytes_read = 0;
+  i2s_channel_read(rx_chan, buf, sizeof(buf), &bytes_read, portMAX_DELAY);
+  if (bytes_read < sizeof(buf)) return;
 
-  // Step 1: I2Sから32bit読み取り
-  i2s_channel_read(rx_chan, &raw, sizeof(int32_t), &bytes_read, portMAX_DELAY);
-  if (bytes_read < sizeof(int32_t)) return;
+  // Lチャンネルだけ使う（Rは常に0なので捨てる）
+  int32_t sample = buf[0] >> 16;
 
-  // Step 2: INMP441 24bit左詰め → 16bit PCM
-  int32_t sample = raw >> 16;
-
-  // Step 3: ボックスフィルター（アンチエイリアス）
+  // ボックスフィルター（アンチエイリアス）
   accumulator += sample;
   decim_count++;
   if (decim_count < DECIMATION_FACTOR) return;
@@ -161,26 +129,24 @@ void loop() {
   accumulator = 0;
   decim_count = 0;
 
-  // Step 4: DCブロッキングフィルター（カットオフ約8Hz）
+  // DCブロッキングフィルター（カットオフ約8Hz）
   int32_t hpf_out = averaged - hpf_x_prev + (hpf_y_prev * 1019) / 1024;
   hpf_x_prev = averaged;
   hpf_y_prev = hpf_out;
 
-  // Step 5: クランプ
+  // クランプ
   int32_t clamped = hpf_out;
   if (clamped >  32767) clamped =  32767;
   if (clamped < -32768) clamped = -32768;
 
-  // Step 6: BLEパケットに追加
-  // キューが満杯なら古いパケットを捨てて新しいものを優先
+  // キューに追加（溢れたら古いものを捨てる）
   packet[packet_index++] = (int16_t)clamped;
   if (packet_index >= SAMPLES_PER_PACKET) {
     if (xQueueSend(audioQueue, packet, 0) != pdPASS) {
       int16_t dummy[SAMPLES_PER_PACKET];
-      xQueueReceive(audioQueue, dummy, 0);  // 古いものを捨てる
-      xQueueSend(audioQueue, packet, 0);    // 新しいものを入れる
+      xQueueReceive(audioQueue, dummy, 0);
+      xQueueSend(audioQueue, packet, 0);
     }
     packet_index = 0;
   }
-
 }
