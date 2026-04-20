@@ -8,8 +8,8 @@
 #define I2S_WS    18
 #define I2S_DIN   16
 
-#define SAMPLE_RATE_HZ      16000 //
-#define DECIMATION_FACTOR   4// 16000 ÷ 4 = 4000Hz出力
+#define SAMPLE_RATE_HZ      16000 //16000から変更
+#define DECIMATION_FACTOR   4 //sample_rate_hz 16000 4から変更（1000Hzが4だと５００、２だと２５０Hz）         // 16000 ÷ 4 = 4000Hz出力
 #define OUTPUT_RATE_HZ      (SAMPLE_RATE_HZ / DECIMATION_FACTOR)
 #define SAMPLES_PER_PACKET  160       // 160 ÷ 4000 = 40ms分
 
@@ -117,7 +117,7 @@ void loop() {
   i2s_channel_read(rx_chan, buf, sizeof(buf), &bytes_read, portMAX_DELAY);
   if (bytes_read < sizeof(buf)) return;
 
-  // Lチャンネルだけ使う（Rは常に0なので捨てる）ここが要だった！！
+  // Lチャンネルだけ使う（Rは常に0なので捨てる）
   int32_t sample = buf[0] >> 16;
 
   // ボックスフィルター（アンチエイリアス）
@@ -129,6 +129,8 @@ void loop() {
   accumulator = 0;
   decim_count = 0;
 
+  /*
+  ---------------------770Hzカット用に調整。
   // DCブロッキングフィルター（カットオフ約8Hz）
   int32_t hpf_out = averaged - hpf_x_prev + (hpf_y_prev * 1019) / 1024;
   hpf_x_prev = averaged;
@@ -136,6 +138,34 @@ void loop() {
 
   // クランプ
   int32_t clamped = hpf_out;
+  if (clamped >  32767) clamped =  32767;
+  if (clamped < -32768) clamped = -32768;
+  */
+  // DCブロッキングフィルター（カットオフ約8Hz）
+  int32_t hpf_out = averaged - hpf_x_prev + (hpf_y_prev * 1019) / 1024;
+  hpf_x_prev = averaged;
+  hpf_y_prev = hpf_out;
+
+  // ノッチフィルター（770Hz除去）
+  // fs=4000Hz, f0=770Hz, Q=10
+  // w0 = 2π × 770/4000 = 1.2095rad
+  // cos(w0) = 0.3518, sin(w0) = 0.9360
+  // α = sin(w0)/(2Q) = 0.0468
+  // b0 = b2 = 1/(1+α) × 1024 = 978
+  // b1 = -2cos(w0)/(1+α) × 1024 = -688
+  // a1 = -2cos(w0)/(1+α) × 1024 = -688  (b1と同じ)
+  // a2 = (1-α)/(1+α) × 1024 = 933
+  static int32_t notch_x1 = 0, notch_x2 = 0;
+  static int32_t notch_y1 = 0, notch_y2 = 0;
+  int32_t notch_out = (978 * hpf_out - 688 * notch_x1 + 978 * notch_x2
+                     + 688 * notch_y1 - 933 * notch_y2) / 1024;
+  notch_x2 = notch_x1;
+  notch_x1 = hpf_out;
+  notch_y2 = notch_y1;
+  notch_y1 = notch_out;
+
+  // クランプ
+  int32_t clamped = notch_out;
   if (clamped >  32767) clamped =  32767;
   if (clamped < -32768) clamped = -32768;
 
